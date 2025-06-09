@@ -1,14 +1,17 @@
 import streamlit as st
 import requests
-import os
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-DATABASE_ID = os.getenv("DATABASE_ID")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+# Load secrets
+NOTION_TOKEN = st.secrets["NOTION_TOKEN"]
+DATABASE_ID = st.secrets["DATABASE_ID"]
+TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
+SONARR_API_KEY = st.secrets["SONARR_API_KEY"]
+SONARR_URL = st.secrets["SONARR_URL"]
+DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
+RADARR_API_KEY = st.secrets["RADARR_API_KEY"]
+RADARR_URL = st.secrets["RADARR_URL"]
+ROOT_FOLDER_TV = st.secrets["ROOT_FOLDER_TV"]
+ROOT_FOLDER_MOVIE = st.secrets["ROOT_FOLDER_MOVIE"]
 
 notion_headers = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -57,11 +60,10 @@ def send_to_notion(title, external_id, mode):
     response = requests.post("https://api.notion.com/v1/pages", headers=notion_headers, json=payload)
     response.raise_for_status()
 
-# Streamlit Setup
+# Streamlit UI Setup
 st.set_page_config(page_title="🏴‍☠️ Pirrate ⚓", page_icon="🏴‍☠️")
 st.title("🏴‍☠️ Pirrate ⚓")
 
-# State setup
 if "step" not in st.session_state:
     st.session_state.step = "landing"
 if "mode" not in st.session_state:
