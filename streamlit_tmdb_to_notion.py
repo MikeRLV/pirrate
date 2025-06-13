@@ -21,16 +21,26 @@ notion_headers = {
 
 def search_tmdb(query, mode):
     endpoint = "tv" if mode == "tv" else "movie"
-    url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={query}"
-    response = requests.get(url)
+    search_url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={query}"
+    response = requests.get(search_url)
     response.raise_for_status()
     results = response.json().get("results", [])
     shows = []
+
     for r in results[:5]:
+        # Fetch genres for each result
+        details_url = f"https://api.themoviedb.org/3/{endpoint}/{r['id']}?api_key={TMDB_API_KEY}"
+        details_response = requests.get(details_url)
+        genres = []
+        if details_response.status_code == 200:
+            genres_data = details_response.json().get("genres", [])
+            genres = [g["name"] for g in genres_data]
+
         shows.append({
             "name": r["name"] if mode == "tv" else r["title"],
             "year": r.get("first_air_date", r.get("release_date", "N/A"))[:4] if r.get("first_air_date") or r.get("release_date") else "N/A",
-            "tmdb_id": r["id"]
+            "tmdb_id": r["id"],
+            "genres": genres
         })
     return shows
 
@@ -108,7 +118,8 @@ elif st.session_state.step == "input":
 elif st.session_state.step == "suggestions":
     st.subheader("Shows found:" if st.session_state.mode == "tv" else "Movies found:")
     for i, s in enumerate(st.session_state.suggestions, 1):
-        st.markdown(f"**{i}.** {s['name']} ({s['year']})")
+        genre_text = f" ({', '.join(s['genres'])})" if s.get("genres") else ""
+        st.markdown(f"**{i}.** {s['name']} ({s['year']}){genre_text}")
     with st.form(key="form_select"):
         selection = st.text_input("Type the number or full title of your choice:")
         col1, col2 = st.columns(2)
