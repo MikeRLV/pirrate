@@ -22,17 +22,16 @@ notion_headers = {
 
 def fetch_genres(tmdb_id, mode):
     endpoint = "tv" if mode == "tv" else "movie"
-    url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}?api_key={TMDB_API_KEY}"
-    res = requests.get(url)
+    details_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}?api_key={TMDB_API_KEY}"
+    res = requests.get(details_url)
     return [g["name"] for g in res.json().get("genres", [])] if res.ok else []
 
 def search_tmdb(query, mode):
     endpoint = "tv" if mode == "tv" else "movie"
     url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={query}"
-    res = requests.get(url)
-    if not res.ok:
-        return []
-    results = res.json().get("results", [])
+    response = requests.get(url)
+    response.raise_for_status()
+    results = response.json().get("results", [])
     shows = []
     for r in results[:5]:
         genres = fetch_genres(r["id"], mode)
@@ -46,26 +45,29 @@ def search_tmdb(query, mode):
 
 def fallback_deepseek(query, mode):
     prompt = (
-        f"The user typed '{query}', which is likely a typo or alternate spelling. "
-        f"Return a numbered list of the top 5 real {mode} titles they most likely meant. "
-        f"Favor popular or well-known results. Do not include commentary or descriptions."
+        f"The user typed '{query}', which is likely a misspelled or fuzzy version of a {mode} title.\n"
+        f"Return a list of 5 real {mode} titles that closely match this input using fuzzy logic.\n"
+        "Output only the numbered list of titles. Do not include descriptions or extra formatting."
     )
-    res = requests.post(
+    response = requests.post(
         "https://api.deepseek.com/chat/completions",
         headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
-        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}
+        json={
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": prompt}]
+        }
     )
-    if not res.ok:
+    if not response.ok:
         return []
-    lines = re.findall(r"\d+\.\s+(.+)", res.json()["choices"][0]["message"]["content"])
-    return [s for s in lines[:5] if s]
+    content = response.json()["choices"][0]["message"]["content"]
+    return [s.strip() for s in re.findall(r"\d+\.\s*(.+)", content)][:5]
 
 def get_external_id(tmdb_id, mode):
     endpoint = "tv" if mode == "tv" else "movie"
     url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}/external_ids?api_key={TMDB_API_KEY}"
-    res = requests.get(url)
-    res.raise_for_status()
-    return res.json().get("tvdb_id") if mode == "tv" else tmdb_id
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json().get("tvdb_id") if mode == "tv" else tmdb_id
 
 def send_to_notion(title, external_id, mode):
     id_field = "TVDB ID" if mode == "tv" else "TMDB ID"
@@ -80,9 +82,10 @@ def send_to_notion(title, external_id, mode):
             "System Response": {"rich_text": [{"text": {"content": "⏳ Waiting to be processed"}}]}
         }
     }
-    requests.post("https://api.notion.com/v1/pages", headers=notion_headers, json=payload).raise_for_status()
+    response = requests.post("https://api.notion.com/v1/pages", headers=notion_headers, json=payload)
+    response.raise_for_status()
 
-# Streamlit UI
+# UI Setup
 st.set_page_config(page_title="🏴‍☠️ Pirrate ⚓", page_icon="🏴‍☠️")
 st.title("🏴‍☠️ Pirrate ⚓")
 
@@ -95,7 +98,7 @@ if "suggestions" not in st.session_state:
 if "selected_show" not in st.session_state:
     st.session_state.selected_show = []
 
-# Step 0
+# Step 0: Landing Page
 if st.session_state.step == "landing":
     st.subheader("What would you like to search for?")
     col1, col2 = st.columns(2)
@@ -108,7 +111,7 @@ if st.session_state.step == "landing":
         st.session_state.step = "input"
         st.rerun()
 
-# Step 1
+# Step 1: Input
 elif st.session_state.step == "input":
     with st.form("form_input"):
         query = st.text_input(f"Enter a {'TV show' if st.session_state.mode == 'tv' else 'movie'} title:")
@@ -119,8 +122,8 @@ elif st.session_state.step == "input":
             with st.spinner("Searching TMDb..."):
                 results = search_tmdb(query, st.session_state.mode)
                 if not results:
-                    alt_titles = fallback_deepseek(query, st.session_state.mode)
-                    st.session_state.suggestions = search_tmdb("|".join(alt_titles), st.session_state.mode)
+                    fuzzy = fallback_deepseek(query, st.session_state.mode)
+                    st.session_state.suggestions = search_tmdb("|".join(fuzzy), st.session_state.mode)
                 else:
                     st.session_state.suggestions = results
                 st.session_state.step = "suggestions"
@@ -129,32 +132,30 @@ elif st.session_state.step == "input":
             st.session_state.step = "landing"
             st.rerun()
 
-# Step 2
+# Step 2: Show Results
 elif st.session_state.step == "suggestions":
-    st.subheader("Shows found:" if st.session_state.mode == "tv" else "Movies found:")
+    label = "Shows" if st.session_state.mode == "tv" else "Movies"
+    st.subheader(f"{label} found:")
     for i, s in enumerate(st.session_state.suggestions, 1):
-        genres = f" ({', '.join(s['genres'])})" if s.get("genres") else ""
-        st.markdown(f"**{i}.** {s['name']} ({s['year']}){genres}")
+        genre = f" ({', '.join(s['genres'])})" if s["genres"] else ""
+        st.markdown(f"**{i}.** {s['name']} ({s['year']}){genre}")
 
     with st.form("form_select"):
-        selection = st.text_input("Enter numbers or names (e.g. 1 3 5 or Title Name):")
+        selection = st.text_input("Enter one or more numbers or titles (e.g. 1 3 5 or Title Name):")
         col1, col2 = st.columns(2)
         confirm = col1.form_submit_button("Confirm")
         back = col2.form_submit_button("Go Back")
         if confirm:
             picked = []
-
-            nums = set(map(int, re.findall(r"\d+", selection)))
-            for i in nums:
-                if 1 <= i <= len(st.session_state.suggestions):
-                    picked.append(st.session_state.suggestions[i - 1])
-
+            numbers = re.findall(r"\d+", selection)
+            for n in map(int, numbers):
+                if 1 <= n <= len(st.session_state.suggestions):
+                    picked.append(st.session_state.suggestions[n-1])
             if not picked:
                 for s in st.session_state.suggestions:
                     if selection.strip().lower() == s["name"].lower():
                         picked = [s]
                         break
-
             if picked:
                 st.session_state.selected_show = picked
                 st.session_state.step = "confirm"
@@ -165,30 +166,30 @@ elif st.session_state.step == "suggestions":
             st.session_state.step = "input"
             st.rerun()
 
-# Step 3
+# Step 3: Confirm & Submit
 elif st.session_state.step == "confirm":
-    for s in st.session_state.selected_show:
-        st.success(f"Selected: {s['name']} ({s['year']})")
+    for show in st.session_state.selected_show:
+        st.success(f"Selected: {show['name']} ({show['year']})")
 
     with st.form("form_confirm"):
         col1, col2 = st.columns(2)
         submit = col1.form_submit_button("Confirm Download")
         back = col2.form_submit_button("Go Back")
         if submit:
-            for s in st.session_state.selected_show:
+            for show in st.session_state.selected_show:
                 try:
-                    eid = get_external_id(s["tmdb_id"], st.session_state.mode)
-                    send_to_notion(s["name"], eid, st.session_state.mode)
-                    st.success(f"✅ {s['name']} sent to Notion.")
+                    ext_id = get_external_id(show["tmdb_id"], st.session_state.mode)
+                    send_to_notion(show["name"], ext_id, st.session_state.mode)
+                    st.success(f"✅ {show['name']} sent to Notion.")
                 except Exception as e:
-                    st.error(f"❌ Failed to submit {s['name']}: {e}")
+                    st.error(f"❌ Failed to submit {show['name']}: {e}")
             st.session_state.step = "done"
             st.rerun()
         elif back:
             st.session_state.step = "suggestions"
             st.rerun()
 
-# Step 4
+# Step 4: Done
 elif st.session_state.step == "done":
     if st.button("➕ Add Another Media"):
         st.session_state.step = "landing"
