@@ -1,13 +1,14 @@
 import streamlit as st
 import requests
+import re
 
 # Load secrets
 NOTION_TOKEN = st.secrets["NOTION_TOKEN"]
 DATABASE_ID = st.secrets["DATABASE_ID"]
 TMDB_API_KEY = st.secrets["TMDB_API_KEY"]
+DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
 SONARR_API_KEY = st.secrets["SONARR_API_KEY"]
 SONARR_URL = st.secrets["SONARR_URL"]
-DEEPSEEK_API_KEY = st.secrets["DEEPSEEK_API_KEY"]
 RADARR_API_KEY = st.secrets["RADARR_API_KEY"]
 RADARR_URL = st.secrets["RADARR_URL"]
 ROOT_FOLDER_TV = st.secrets["ROOT_FOLDER_TV"]
@@ -19,40 +20,48 @@ notion_headers = {
     "Content-Type": "application/json"
 }
 
+def fetch_genres(tmdb_id, mode):
+    endpoint = "tv" if mode == "tv" else "movie"
+    details_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}?api_key={TMDB_API_KEY}"
+    res = requests.get(details_url)
+    return [g["name"] for g in res.json().get("genres", [])] if res.ok else []
+
 def search_tmdb(query, mode):
     endpoint = "tv" if mode == "tv" else "movie"
-    search_url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={query}"
-    response = requests.get(search_url)
+    url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={query}"
+    response = requests.get(url)
     response.raise_for_status()
     results = response.json().get("results", [])
+
     shows = []
-
     for r in results[:5]:
-        # Fetch genres for each result
-        details_url = f"https://api.themoviedb.org/3/{endpoint}/{r['id']}?api_key={TMDB_API_KEY}"
-        details_response = requests.get(details_url)
-        genres = []
-        if details_response.status_code == 200:
-            genres_data = details_response.json().get("genres", [])
-            genres = [g["name"] for g in genres_data]
-
+        genres = fetch_genres(r["id"], mode)
         shows.append({
             "name": r["name"] if mode == "tv" else r["title"],
-            "year": r.get("first_air_date", r.get("release_date", "N/A"))[:4] if r.get("first_air_date") or r.get("release_date") else "N/A",
+            "year": r.get("first_air_date", r.get("release_date", "N/A"))[:4],
             "tmdb_id": r["id"],
             "genres": genres
         })
     return shows
+
+def fallback_deepseek(query, mode):
+    prompt = f"Give me 5 {mode} titles similar to '{query}', return in numbered list only."
+    res = requests.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={"Authorization": f"Bearer {DEEPSEEK_API_KEY}"},
+        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}
+    )
+    if not res.ok:
+        return []
+    lines = re.findall(r"\d+\.\s+(.+)", res.json()["choices"][0]["message"]["content"])
+    return [s for s in lines[:5] if s]
 
 def get_external_id(tmdb_id, mode):
     endpoint = "tv" if mode == "tv" else "movie"
     url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}/external_ids?api_key={TMDB_API_KEY}"
     response = requests.get(url)
     response.raise_for_status()
-    if mode == "tv":
-        return response.json().get("tvdb_id")
-    else:
-        return tmdb_id
+    return response.json().get("tvdb_id") if mode == "tv" else tmdb_id
 
 def send_to_notion(title, external_id, mode):
     id_field = "TVDB ID" if mode == "tv" else "TMDB ID"
@@ -70,7 +79,7 @@ def send_to_notion(title, external_id, mode):
     response = requests.post("https://api.notion.com/v1/pages", headers=notion_headers, json=payload)
     response.raise_for_status()
 
-# Streamlit UI Setup
+# UI Setup
 st.set_page_config(page_title="🏴‍☠️ Pirrate ⚓", page_icon="🏴‍☠️")
 st.title("🏴‍☠️ Pirrate ⚓")
 
@@ -81,7 +90,7 @@ if "mode" not in st.session_state:
 if "suggestions" not in st.session_state:
     st.session_state.suggestions = []
 if "selected_show" not in st.session_state:
-    st.session_state.selected_show = {}
+    st.session_state.selected_show = []
 
 # Step 0: Landing Page
 if st.session_state.step == "landing":
@@ -96,46 +105,56 @@ if st.session_state.step == "landing":
         st.session_state.step = "input"
         st.rerun()
 
-# Step 1: Search Input
+# Step 1: Input
 elif st.session_state.step == "input":
-    with st.form(key="form_input"):
-        query = st.text_input(f"Enter a { 'TV show' if st.session_state.mode == 'tv' else 'movie' } title:")
+    with st.form("form_input"):
+        query = st.text_input(f"Enter a {'TV show' if st.session_state.mode == 'tv' else 'movie'} title:")
         col1, col2 = st.columns(2)
         submit = col1.form_submit_button("Submit")
         back = col2.form_submit_button("Go Back")
-        if submit:
-            if query.strip():
-                with st.spinner("Searching TMDb..."):
-                    st.session_state.suggestions = search_tmdb(query, st.session_state.mode)
-                    st.session_state.step = "suggestions"
-                    st.rerun()
+        if submit and query.strip():
+            with st.spinner("Searching TMDb..."):
+                results = search_tmdb(query, st.session_state.mode)
+                if not results:
+                    fallback_titles = fallback_deepseek(query, st.session_state.mode)
+                    st.session_state.suggestions = search_tmdb("|".join(fallback_titles), st.session_state.mode)
+                else:
+                    st.session_state.suggestions = results
+                st.session_state.step = "suggestions"
+                st.rerun()
         elif back:
             st.session_state.step = "landing"
-            st.session_state.mode = None
             st.rerun()
 
 # Step 2: Show Results
 elif st.session_state.step == "suggestions":
-    st.subheader("Shows found:" if st.session_state.mode == "tv" else "Movies found:")
+    label = "Shows" if st.session_state.mode == "tv" else "Movies"
+    st.subheader(f"{label} found:")
     for i, s in enumerate(st.session_state.suggestions, 1):
-        genre_text = f" ({', '.join(s['genres'])})" if s.get("genres") else ""
-        st.markdown(f"**{i}.** {s['name']} ({s['year']}){genre_text}")
-    with st.form(key="form_select"):
-        selection = st.text_input("Type the number or full title of your choice:")
+        genre = f" ({', '.join(s['genres'])})" if s["genres"] else ""
+        st.markdown(f"**{i}.** {s['name']} ({s['year']}){genre}")
+
+    with st.form("form_select"):
+        selection = st.text_input("Enter one or more numbers or titles (e.g. 1 3 5 or Title Name):")
         col1, col2 = st.columns(2)
         confirm = col1.form_submit_button("Confirm")
         back = col2.form_submit_button("Go Back")
         if confirm:
-            picked = None
-            if selection.strip().isdigit():
-                index = int(selection.strip()) - 1
-                if 0 <= index < len(st.session_state.suggestions):
-                    picked = st.session_state.suggestions[index]
-            else:
-                for show in st.session_state.suggestions:
-                    if selection.strip().lower() == show["name"].lower():
-                        picked = show
+            picked = []
+
+            # Match by number (supports: 1-3 or 1,3,5)
+            numbers = re.findall(r"\d+", selection)
+            for n in map(int, numbers):
+                if 1 <= n <= len(st.session_state.suggestions):
+                    picked.append(st.session_state.suggestions[n-1])
+
+            # Match by name
+            if not picked:
+                for s in st.session_state.suggestions:
+                    if selection.strip().lower() == s["name"].lower():
+                        picked = [s]
                         break
+
             if picked:
                 st.session_state.selected_show = picked
                 st.session_state.step = "confirm"
@@ -144,26 +163,27 @@ elif st.session_state.step == "suggestions":
                 st.warning("❗ Invalid selection.")
         elif back:
             st.session_state.step = "input"
-            st.session_state.suggestions = []
             st.rerun()
 
-# Step 3: Confirm Download
+# Step 3: Confirm & Submit
 elif st.session_state.step == "confirm":
-    show = st.session_state.selected_show
-    st.success(f"Selected: {show['name']} ({show['year']})")
-    with st.form(key="form_confirm"):
+    for show in st.session_state.selected_show:
+        st.success(f"Selected: {show['name']} ({show['year']})")
+
+    with st.form("form_confirm"):
         col1, col2 = st.columns(2)
         submit = col1.form_submit_button("Confirm Download")
         back = col2.form_submit_button("Go Back")
         if submit:
-            try:
-                external_id = get_external_id(show["tmdb_id"], st.session_state.mode)
-                send_to_notion(show["name"], external_id, st.session_state.mode)
-                st.success("✅ Show submitted successfully and ready for Sonarr/Radarr.")
-                st.session_state.step = "done"
-                st.rerun()
-            except Exception as e:
-                st.error(f"❌ Failed to submit: {e}")
+            for show in st.session_state.selected_show:
+                try:
+                    ext_id = get_external_id(show["tmdb_id"], st.session_state.mode)
+                    send_to_notion(show["name"], ext_id, st.session_state.mode)
+                    st.success(f"✅ {show['name']} sent to Notion.")
+                except Exception as e:
+                    st.error(f"❌ Failed to submit {show['name']}: {e}")
+            st.session_state.step = "done"
+            st.rerun()
         elif back:
             st.session_state.step = "suggestions"
             st.rerun()
@@ -174,6 +194,6 @@ elif st.session_state.step == "done":
         st.session_state.step = "landing"
         st.session_state.mode = None
         st.session_state.suggestions = []
-        st.session_state.selected_show = {}
+        st.session_state.selected_show = []
         st.rerun()
     st.success("✅ Your media has been successfully submitted!")
