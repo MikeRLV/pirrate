@@ -46,9 +46,9 @@ def search_tmdb(query, mode):
 
 def fallback_deepseek(query, mode):
     prompt = (
-        f"The user searched for '{query}' which may be a misspelling. "
-        f"Give me the 5 most likely correct {mode} titles they meant. "
-        f"Respond with a numbered list only, no extra text."
+        f"The user typed '{query}', which is likely a typo or alternate spelling. "
+        f"Return a numbered list of the top 5 real {mode} titles they most likely meant. "
+        f"Favor popular or well-known results. Do not include commentary or descriptions."
     )
     res = requests.post(
         "https://api.deepseek.com/chat/completions",
